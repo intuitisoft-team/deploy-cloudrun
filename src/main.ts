@@ -23,6 +23,7 @@ import {
   setFailed,
   setOutput,
   warning as logWarning,
+  debug,
 } from '@actions/core';
 import { getExecOutput } from '@actions/exec';
 import * as toolCache from '@actions/tool-cache';
@@ -92,6 +93,7 @@ export async function run(): Promise<void> {
 
   try {
     // Get action inputs
+    const container = getInput('container'); // Container ie hello-1
     const image = getInput('image'); // Image ie gcr.io/...
     const service = getInput('service'); // Service name
     const metadata = getInput('metadata'); // YAML file
@@ -114,7 +116,14 @@ export async function run(): Promise<void> {
     const flags = getInput('flags');
 
     let responseType = ResponseTypes.DEPLOY; // Default response type for output parsing
-    let cmd;
+    let cmd,
+      args = [];
+
+    // Push common flags
+    args.push('--platform', 'managed');
+    args.push('--format', 'json');
+    if (region) args.push('--region', region);
+    if (projectId) args.push('--project', projectId);
 
     // Throw errors if inputs aren't valid
     if (revTraffic && tagTraffic) {
@@ -139,10 +148,11 @@ export async function run(): Promise<void> {
 
       // Update traffic
       cmd = ['run', 'services', 'update-traffic', service];
-      if (revTraffic) cmd.push('--to-revisions', revTraffic);
-      if (tagTraffic) cmd.push('--to-tags', tagTraffic);
+      if (revTraffic) args.push('--to-revisions', revTraffic);
+      if (tagTraffic) args.push('--to-tags', tagTraffic);
 
       const providedButIgnored: Record<string, boolean> = {
+        container: container !== '',
         image: image !== '',
         metadata: metadata !== '',
         source: source !== '',
@@ -163,6 +173,7 @@ export async function run(): Promise<void> {
       cmd = ['run', 'services', 'replace', metadata];
 
       const providedButIgnored: Record<string, boolean> = {
+        container: container !== '',
         image: image !== '',
         service: service !== '',
         source: source !== '',
@@ -184,47 +195,49 @@ export async function run(): Promise<void> {
     } else {
       cmd = ['run', 'deploy', service, '--quiet'];
 
+      // Compile the labels
+      const defLabels = skipDefaultLabels ? {} : defaultLabels();
+      const compiledLabels = Object.assign({}, defLabels, labels);
+      if (compiledLabels && Object.keys(compiledLabels).length > 0) {
+        args.push('--update-labels', joinKVStringForGCloud(compiledLabels));
+      }
+
+      if (container) {
+        // Deploy specified container
+        args.push('--container', container);
+      }
       if (image) {
         // Deploy service with image specified
-        cmd.push('--image', image);
+        args.push('--image', image);
       } else if (source) {
         // Deploy service from source
-        cmd.push('--source', source);
+        args.push('--source', source);
       }
 
       // Set optional flags from inputs
       const compiledEnvVars = parseKVStringAndFile(envVars, envVarsFile);
       if (compiledEnvVars && Object.keys(compiledEnvVars).length > 0) {
-        cmd.push('--update-env-vars', joinKVStringForGCloud(compiledEnvVars));
+        args.push('--update-env-vars', joinKVStringForGCloud(compiledEnvVars));
       }
       if (secrets && Object.keys(secrets).length > 0) {
-        cmd.push('--update-secrets', joinKVStringForGCloud(secrets));
+        args.push('--update-secrets', joinKVStringForGCloud(secrets));
       }
       if (tag) {
-        cmd.push('--tag', tag);
+        args.push('--tag', tag);
       }
-      if (suffix) cmd.push('--revision-suffix', suffix);
-      if (noTraffic) cmd.push('--no-traffic');
-      if (timeout) cmd.push('--timeout', timeout);
 
-      // Compile the labels
-      const defLabels = skipDefaultLabels ? {} : defaultLabels();
-      const compiledLabels = Object.assign({}, defLabels, labels);
-      if (compiledLabels && Object.keys(compiledLabels).length > 0) {
-        cmd.push('--update-labels', joinKVStringForGCloud(compiledLabels));
-      }
+      if (suffix) args.push('--revision-suffix', suffix);
+      if (noTraffic) args.push('--no-traffic');
+      if (timeout) args.push('--timeout', timeout);
     }
 
-    // Push common flags
-    cmd.push('--platform', 'managed');
-    cmd.push('--format', 'json');
-    if (region) cmd.push('--region', region);
-    if (projectId) cmd.push('--project', projectId);
-
     // Add optional flags
+    console.log({ flags });
     if (flags) {
       const flagList = parseFlags(flags);
-      if (flagList) cmd = cmd.concat(flagList);
+      console.log({ flagList });
+      if (flagList) args = args.concat(flagList);
+      console.log({ args });
     }
 
     // Install gcloud if not already installed.
@@ -238,7 +251,7 @@ export async function run(): Promise<void> {
     // Install gcloud component if needed and prepend the command
     if (gcloudComponent) {
       await installGcloudComponent(gcloudComponent);
-      cmd.unshift(gcloudComponent);
+      args.unshift(gcloudComponent);
     }
 
     // Authenticate - this comes from google-github-actions/auth.
@@ -252,8 +265,12 @@ export async function run(): Promise<void> {
 
     const toolCommand = getToolCommand();
     const options = { silent: !isDebug, ignoreReturnCode: true };
+    console.log({ args });
+    cmd = [...cmd, ...args];
+    console.log({ cmd });
     const commandString = `${toolCommand} ${cmd.join(' ')}`;
     logInfo(`Running: ${commandString}`);
+    debug(commandString);
 
     // Run gcloud cmd.
     const output = await getExecOutput(toolCommand, cmd, options);

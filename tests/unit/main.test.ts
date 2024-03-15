@@ -236,6 +236,17 @@ test('#run', { concurrency: true }, async (suite) => {
     assertMembers(args, ['--source', 'example-app']);
   });
 
+  await suite.test('sets container if given', async (t) => {
+    const mocks = defaultMocks(t.mock, {
+      container: 'hello-1',
+    });
+
+    await run();
+
+    const args = mocks.getExecOutput.mock.calls?.at(0).arguments?.at(1);
+    assertMembers(args, ['--container', 'hello-1', '--image', fakeInputs.image]);
+  });
+
   await suite.test('sets metadata if given', async (t) => {
     const mocks = defaultMocks(t.mock, {
       metadata: 'yaml',
